@@ -1,4 +1,5 @@
 ﻿using System.Security.Cryptography.X509Certificates;
+using System.Text;
 using MQTTnet;
 using MQTTnet.Client;
 using MQTTnet.Formatter;
@@ -24,18 +25,28 @@ var mqttFactory = new MqttFactory();
 
 using (var mqttClient = mqttFactory.CreateMqttClient())
 {
+    Console.WriteLine("Who are you ?");
+    Console.WriteLine("1 - Client 1 (sender)");
+    Console.WriteLine("2 - Client 2 (subscriber)");
+
+    Console.WriteLine("Your choice : ");
+    var client = Console.ReadLine() == "1" ? "demo-mqtt" : "demo-mqtt2";
+
     // Use builder classes where possible in this project.
     var mqttClientOptions = new MqttClientOptionsBuilder()
         .WithTcpServer("demomqtt.francecentral-1.ts.eventgrid.azure.net", 8883)
-        //.WithProtocolVersion(MqttProtocolVersion.V500)
-        .WithClientId("demo-mqtt")
-        .WithCredentials("demo-mqtt", "")
+        .WithProtocolVersion(MqttProtocolVersion.V500)
+        .WithClientId(client)
+        .WithCredentials(client, "")
         .WithTlsOptions(new MqttClientTlsOptionsBuilder()
                 .WithSslProtocols(System.Security.Authentication.SslProtocols.Tls12 | System.Security.Authentication.SslProtocols.Tls13)
                 .WithClientCertificates(certificates) // Missed to update the client certificate provider details**
                 .Build())
-        //.WithKeepAlivePeriod(TimeSpan.FromSeconds(5 * 60))
+        .WithKeepAlivePeriod(TimeSpan.FromSeconds(5 * 60))
         .WithWillPayload("Bye !")
+        .WithWillTopic($"{client1Topic}/lwt")
+        .WithWillQualityOfServiceLevel(MqttQualityOfServiceLevel.AtLeastOnce)
+        .WithCleanSession(false)
         .Build();
 
     // This will throw an exception if the server is not available.
@@ -45,6 +56,49 @@ using (var mqttClient = mqttFactory.CreateMqttClient())
 
     Console.WriteLine("The MQTT client is connected.");
     Console.WriteLine("---------------------------------");
+
+    if(client == "demo-mqtt2")
+    {
+        await mqttClient.SubscribeAsync(client1Topic, MqttQualityOfServiceLevel.AtLeastOnce);
+        await mqttClient.SubscribeAsync($"{client1Topic}/request", MqttQualityOfServiceLevel.AtLeastOnce);
+        await mqttClient.SubscribeAsync($"{client1Topic}/lwt", MqttQualityOfServiceLevel.AtLeastOnce);
+
+        Console.WriteLine("Subscribed to " + client1Topic);
+
+        mqttClient.ApplicationMessageReceivedAsync += async e =>
+        {
+            Console.WriteLine("Received message from " + e.ApplicationMessage.Topic);
+            Console.WriteLine("Payload : " + Encoding.UTF8.GetString(e.ApplicationMessage.PayloadSegment));
+
+            if(e.ApplicationMessage.Topic == $"{client1Topic}/request")
+            {
+                var applicationMessage = new MqttApplicationMessageBuilder()
+                    .WithTopic($"{client1Topic}/response")
+                    .WithPayload(new Random().Next(15, 25).ToString())
+                    .WithQualityOfServiceLevel(MqttQualityOfServiceLevel.AtLeastOnce)
+                    .Build();
+
+                await mqttClient.PublishAsync(applicationMessage, CancellationToken.None);
+
+                Console.WriteLine("Response message sent");
+            }
+        };
+
+        Console.WriteLine("Waiting for messages...");
+        Console.ReadLine();
+
+        Environment.Exit(0);
+    }
+
+    while (true)
+    {
+        await Menu(mqttClient);
+    }
+}
+
+async Task Menu(IMqttClient mqttClient)
+{
+    Console.Clear();
     Console.WriteLine("1 - Send multiple message (QoS 0)");
     Console.WriteLine("2 - Send multiple message (QoS 1)");
     Console.WriteLine("3 - Send a Request/Response message to the server");
@@ -100,6 +154,7 @@ async Task SendMultipleMessageQoS1(IMqttClient mqttClient)
                 .WithTopic(client1Topic)
                 .WithPayload(new Random().Next(15, 25).ToString())
                 .WithQualityOfServiceLevel(MqttQualityOfServiceLevel.AtLeastOnce)
+                .WithRetainFlag(true)
                 .Build();
 
         await mqttClient.PublishAsync(applicationMessage, CancellationToken.None);
@@ -111,15 +166,22 @@ async Task SendMultipleMessageQoS1(IMqttClient mqttClient)
 }
 
 async Task SendRequestResponseMessage(IMqttClient mqttClient){
-    var response = await mqttClient.SubscribeAsync("client1/temperature/chambre/response", MqttQualityOfServiceLevel.AtLeastOnce);
+    var response = await mqttClient.SubscribeAsync($"{client1Topic}/response", MqttQualityOfServiceLevel.AtLeastOnce);
+
     var applicationMessage = new MqttApplicationMessageBuilder()
-                .WithTopic("client1/temperature/chambre/request")
+                .WithTopic($"{client1Topic}/request")
                 .WithPayload("Requesting temperature value")
                 .WithQualityOfServiceLevel(MqttQualityOfServiceLevel.AtLeastOnce)
-                .WithResponseTopic("client1/temperature/chambre/response")
+                .WithResponseTopic($"{client1Topic}/response")
                 .Build();
 
     await mqttClient.PublishAsync(applicationMessage, CancellationToken.None);
+
+    mqttClient.ApplicationMessageReceivedAsync += async e =>
+    {
+        Console.WriteLine("Received message from " + e.ApplicationMessage.Topic);
+        Console.WriteLine("Payload : " + Encoding.UTF8.GetString(e.ApplicationMessage.PayloadSegment));
+    };
 
     Console.WriteLine("Request message sent. Waiting for response...");
 
@@ -131,7 +193,11 @@ async Task DisconnectAndSendLastWill(IMqttClient mqttClient)
 {
     // Send a clean disconnect to the server by calling _DisconnectAsync_. Without this the TCP connection
     // gets dropped and the server will handle this as a non clean disconnect (see MQTT spec for details).
-    var mqttClientDisconnectOptions = mqttFactory.CreateClientDisconnectOptionsBuilder().Build();
+    var mqttClientDisconnectOptions = mqttFactory
+        .CreateClientDisconnectOptionsBuilder()
+        .WithReason(MqttClientDisconnectOptionsReason.DisconnectWithWillMessage)
+        .Build();
 
     await mqttClient.DisconnectAsync(mqttClientDisconnectOptions, CancellationToken.None);
+    Environment.Exit(0);
 }
