@@ -5,10 +5,13 @@ using MQTTnet.Client;
 using MQTTnet.Formatter;
 using MQTTnet.Protocol;
 
-var x509_pem = @"C:\Users\pc\Documents\_Tmp\MQTTCertificate\openssl.crt.pem";  //Provide your client certificate .cer.pem file path
-var x509_key = @"C:\Users\pc\Documents\_Tmp\MQTTCertificate\openssl.key.pem";  //Provide your client certificate .key.pem file path
+const string x509_pem = @"C:\Users\pc\Documents\_Tmp\MQTTCertificate\openssl.crt.pem";  //Provide your client certificate .cer.pem file path
+const string x509_key = @"C:\Users\pc\Documents\_Tmp\MQTTCertificate\openssl.key.pem";  //Provide your client certificate .key.pem file path
 
-var client1Topic = "client1/temperature/chambre";
+const string client1Topic = "client1/temperature/chambre";
+
+const string clientSender = "demo-mqtt";
+const string clientSubscriber = "demo-mqtt2";
 
 // Load certificate and private key from PEM files
 var certificate = new X509Certificate2(X509Certificate2.CreateFromPemFile(x509_pem, x509_key).Export(X509ContentType.Pkcs12));
@@ -30,7 +33,7 @@ using (var mqttClient = mqttFactory.CreateMqttClient())
     Console.WriteLine("2 - Client 2 (subscriber)");
 
     Console.WriteLine("Your choice : ");
-    var client = Console.ReadLine() == "1" ? "demo-mqtt" : "demo-mqtt2";
+    var client = IsSenderClient() ? clientSender : clientSubscriber;
 
     // Use builder classes where possible in this project.
     var mqttClientOptions = new MqttClientOptionsBuilder()
@@ -40,68 +43,30 @@ using (var mqttClient = mqttFactory.CreateMqttClient())
         .WithCredentials(client, "")
         .WithTlsOptions(new MqttClientTlsOptionsBuilder()
                 .WithSslProtocols(System.Security.Authentication.SslProtocols.Tls12 | System.Security.Authentication.SslProtocols.Tls13)
-                .WithClientCertificates(certificates) // Missed to update the client certificate provider details**
+                .WithClientCertificates(certificates)
                 .Build())
-        .WithKeepAlivePeriod(TimeSpan.FromSeconds(5 * 60))
         .WithWillPayload("Bye !")
         .WithWillTopic($"{client1Topic}/lwt")
         .WithWillQualityOfServiceLevel(MqttQualityOfServiceLevel.AtLeastOnce)
-        .WithCleanSession(false)
         .Build();
 
-    // This will throw an exception if the server is not available.
-    // The result from this message returns additional data which was sent
-    // from the server. Please refer to the MQTT protocol specification for details.
     var response = await mqttClient.ConnectAsync(mqttClientOptions, CancellationToken.None);
 
     Console.WriteLine("The MQTT client is connected.");
     Console.WriteLine("---------------------------------");
 
-    if(client == "demo-mqtt2")
-    {
-        await mqttClient.SubscribeAsync(client1Topic, MqttQualityOfServiceLevel.AtLeastOnce);
-        await mqttClient.SubscribeAsync($"{client1Topic}/request", MqttQualityOfServiceLevel.AtLeastOnce);
-        await mqttClient.SubscribeAsync($"{client1Topic}/lwt", MqttQualityOfServiceLevel.AtLeastOnce);
-
-        Console.WriteLine("Subscribed to " + client1Topic);
-
-        mqttClient.ApplicationMessageReceivedAsync += async e =>
-        {
-            Console.WriteLine("Received message from " + e.ApplicationMessage.Topic);
-            Console.WriteLine("Payload : " + Encoding.UTF8.GetString(e.ApplicationMessage.PayloadSegment));
-
-            if(e.ApplicationMessage.Topic == $"{client1Topic}/request")
-            {
-                var applicationMessage = new MqttApplicationMessageBuilder()
-                    .WithTopic($"{client1Topic}/response")
-                    .WithPayload(new Random().Next(15, 25).ToString())
-                    .WithQualityOfServiceLevel(MqttQualityOfServiceLevel.AtLeastOnce)
-                    .Build();
-
-                await mqttClient.PublishAsync(applicationMessage, CancellationToken.None);
-
-                Console.WriteLine("Response message sent");
-            }
-        };
-
-        Console.WriteLine("Waiting for messages...");
-        Console.ReadLine();
-
-        Environment.Exit(0);
-    }
+    if (IsSubscriberClient(client))
+        await SubscribeToTopics(client1Topic, mqttClient);
 
     while (true)
-    {
         await Menu(mqttClient);
-    }
 }
 
 async Task Menu(IMqttClient mqttClient)
 {
     Console.Clear();
     Console.WriteLine("1 - Send multiple message (QoS 0)");
-    Console.WriteLine("2 - Send multiple message (QoS 1)");
-    Console.WriteLine("3 - Send a Request/Response message to the server");
+    Console.WriteLine("2 - Send a Request/Response message to the server");
     Console.WriteLine("X - Disconnect and send Last Will and Testament (LWT) message");
 
     Console.WriteLine("Your choice : ");
@@ -113,9 +78,6 @@ async Task Menu(IMqttClient mqttClient)
             await SendMultipleMessage(mqttClient);
             break;
         case "2":
-            await SendMultipleMessageQoS1(mqttClient);
-            break;
-        case "3":
             await SendRequestResponseMessage(mqttClient);
             break;
         case "X":
@@ -141,26 +103,6 @@ async Task SendMultipleMessage(IMqttClient mqttClient) {
 
         Console.WriteLine($"Message {i + 1} sent");
         
-        Thread.Sleep(1000);
-    }
-}
-
-async Task SendMultipleMessageQoS1(IMqttClient mqttClient)
-{
-    // loop for 5 messages with randome temperature values
-    for (int i = 0; i < 5; i++)
-    {
-        var applicationMessage = new MqttApplicationMessageBuilder()
-                .WithTopic(client1Topic)
-                .WithPayload(new Random().Next(15, 25).ToString())
-                .WithQualityOfServiceLevel(MqttQualityOfServiceLevel.AtLeastOnce)
-                .WithRetainFlag(true)
-                .Build();
-
-        await mqttClient.PublishAsync(applicationMessage, CancellationToken.None);
-
-        Console.WriteLine($"Message {i + 1} sent");
-
         Thread.Sleep(1000);
     }
 }
@@ -199,5 +141,48 @@ async Task DisconnectAndSendLastWill(IMqttClient mqttClient)
         .Build();
 
     await mqttClient.DisconnectAsync(mqttClientDisconnectOptions, CancellationToken.None);
+    Environment.Exit(0);
+}
+
+static bool IsSubscriberClient(string client)
+{
+    return client == clientSubscriber;
+}
+
+static bool IsSenderClient()
+{
+    return Console.ReadLine() == "1";
+}
+
+static async Task SubscribeToTopics(string client1Topic, IMqttClient mqttClient)
+{
+    await mqttClient.SubscribeAsync(client1Topic, MqttQualityOfServiceLevel.AtLeastOnce);
+    await mqttClient.SubscribeAsync($"{client1Topic}/request", MqttQualityOfServiceLevel.AtLeastOnce);
+    await mqttClient.SubscribeAsync($"{client1Topic}/lwt", MqttQualityOfServiceLevel.AtLeastOnce);
+
+    Console.WriteLine("Subscribed to " + client1Topic);
+
+    mqttClient.ApplicationMessageReceivedAsync += async e =>
+    {
+        Console.WriteLine("Received message from " + e.ApplicationMessage.Topic);
+        Console.WriteLine("Payload : " + Encoding.UTF8.GetString(e.ApplicationMessage.PayloadSegment));
+
+        if (e.ApplicationMessage.Topic == $"{client1Topic}/request")
+        {
+            var applicationMessage = new MqttApplicationMessageBuilder()
+                .WithTopic(e.ApplicationMessage.ResponseTopic)
+                .WithPayload(new Random().Next(15, 25).ToString())
+                .WithQualityOfServiceLevel(MqttQualityOfServiceLevel.AtLeastOnce)
+                .Build();
+
+            await mqttClient.PublishAsync(applicationMessage, CancellationToken.None);
+
+            Console.WriteLine("Response message sent");
+        }
+    };
+
+    Console.WriteLine("Waiting for messages...");
+    Console.ReadLine();
+
     Environment.Exit(0);
 }
